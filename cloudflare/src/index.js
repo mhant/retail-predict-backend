@@ -433,7 +433,7 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
       if (!ticker) return badRequest('ticker param required')
       const { results } = await env.DB.prepare(
         `SELECT id, ticker, body, submitted_at
-         FROM tips WHERE ticker = ?1 AND status = 'approved'
+         FROM tips WHERE ticker = ?1 AND status = 'approved' AND report_count < 5
          ORDER BY submitted_at DESC LIMIT 20`
       ).bind(ticker.toUpperCase()).all()
       return apiJson({ ok: true, ticker, data: results })
@@ -443,18 +443,18 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
     if (request.method === 'GET' && path === '/api/tips/feed') {
       const { results } = await env.DB.prepare(
         `SELECT id, ticker, body, submitted_at
-         FROM tips WHERE status = 'approved'
+         FROM tips WHERE status = 'approved' AND report_count < 5
          ORDER BY submitted_at DESC LIMIT 100`
       ).all()
       return apiJson({ ok: true, data: results })
     }
 
-    // POST /api/tips/:id/report — flag a tip for review (public)
+    // POST /api/tips/:id/report — increment report count (public)
     const reportMatch = path.match(/^\/api\/tips\/(\d+)\/report$/)
     if (request.method === 'POST' && reportMatch) {
       const tipId = parseInt(reportMatch[1])
       const { meta } = await env.DB.prepare(
-        "UPDATE tips SET status = 'reported' WHERE id = ?1 AND status = 'approved'"
+        'UPDATE tips SET report_count = report_count + 1 WHERE id = ?1'
       ).bind(tipId).run()
       if (!meta.changes) return json({ ok: false, error: 'not_found' }, 404)
       return json({ ok: true })
@@ -475,10 +475,11 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
       const search = params.get('search') || ''
       const ticker = params.get('ticker') || ''
       const status = params.get('status') || ''
-      let query = 'SELECT id, ticker, body, status, submitted_at FROM tips WHERE 1=1'
+      let query = 'SELECT id, ticker, body, status, report_count, submitted_at FROM tips WHERE 1=1'
       const bindings = []
       if (ticker) { query += ' AND ticker = ?'; bindings.push(ticker.toUpperCase().trim()) }
-      if (status) { query += ' AND status = ?'; bindings.push(status) }
+      if (status === 'reported') { query += ' AND report_count >= 5' }
+      else if (status === 'clean') { query += ' AND report_count = 0' }
       if (search) { query += ' AND body LIKE ?'; bindings.push(`%${search}%`) }
       query += ' ORDER BY submitted_at DESC LIMIT 500'
       const { results } = await env.DB.prepare(query).bind(...bindings).all()
@@ -489,7 +490,7 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
     if (request.method === 'GET' && path === '/api/tips/reported') {
       if (!isAuthed(request, env)) return unauthorized()
       const { results } = await env.DB.prepare(
-        "SELECT id, ticker, body, submitted_at FROM tips WHERE status = 'reported' ORDER BY submitted_at DESC"
+        'SELECT id, ticker, body, report_count, submitted_at FROM tips WHERE report_count > 0 ORDER BY report_count DESC, submitted_at DESC'
       ).all()
       return apiJson({ ok: true, data: results })
     }
@@ -500,7 +501,7 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
       const cutoff = Math.floor(Date.now() / 1000) - 108000
       const { results } = await env.DB.prepare(
         `SELECT id, ticker, body, submitted_at
-         FROM tips WHERE status = 'approved' AND submitted_at > ?1
+         FROM tips WHERE status = 'approved' AND report_count < 5 AND submitted_at > ?1
          ORDER BY submitted_at DESC`
       ).bind(cutoff).all()
       return apiJson({ ok: true, data: results })
