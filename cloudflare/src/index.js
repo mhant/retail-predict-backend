@@ -469,6 +469,22 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
       return json({ ok: true })
     }
 
+    // GET /api/tips/all — all tips with optional ?search= and ?ticker= filters (auth required)
+    if (request.method === 'GET' && path === '/api/tips/all') {
+      if (!isAuthed(request, env)) return unauthorized()
+      const search = params.get('search') || ''
+      const ticker = params.get('ticker') || ''
+      const status = params.get('status') || ''
+      let query = 'SELECT id, ticker, body, status, submitted_at FROM tips WHERE 1=1'
+      const bindings = []
+      if (ticker) { query += ' AND ticker = ?'; bindings.push(ticker.toUpperCase().trim()) }
+      if (status) { query += ' AND status = ?'; bindings.push(status) }
+      if (search) { query += ' AND body LIKE ?'; bindings.push(`%${search}%`) }
+      query += ' ORDER BY submitted_at DESC LIMIT 500'
+      const { results } = await env.DB.prepare(query).bind(...bindings).all()
+      return apiJson({ ok: true, data: results })
+    }
+
     // GET /api/tips/reported — tips flagged for review (auth required)
     if (request.method === 'GET' && path === '/api/tips/reported') {
       if (!isAuthed(request, env)) return unauthorized()
