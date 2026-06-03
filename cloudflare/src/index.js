@@ -164,6 +164,16 @@ async function batchInsert(db, table, rows, mode) {
 }
 
 
+function containsUrl(text) {
+  if (/https?:\/\/|ftp:\/\//i.test(text)) return true
+  if (/\bwww[\s.]/i.test(text)) return true
+  if (/\b[\w-]+\.(com|net|org|io|co|gov|edu|xyz|app|dev|ai|info|biz|me|tv|us|uk|ca|au|de|fr|finance|money|trade)\b/i.test(text)) return true
+  if (/\b\w+\s*[\[(]\.?dot\.?[\])]\s*\w+/i.test(text)) return true
+  if (/\b\w+\s*[\[(]\s*\.\s*[\])]\s*\w+/i.test(text)) return true
+  if (/\b\w+\s+dot\s+\w+/i.test(text)) return true
+  return false
+}
+
 async function hashIp(ip) {
   const data = new TextEncoder().encode(ip || 'unknown')
   const buf  = await crypto.subtle.digest('SHA-256', data)
@@ -356,6 +366,7 @@ export default {
       const trimmed = tip.trim()
       if (trimmed.length < 10)  return badRequest('Tip must be at least 10 characters')
       if (trimmed.length > 500) return badRequest('Tip must be under 500 characters')
+      if (containsUrl(trimmed)) return json({ ok: false, error: 'contains_link' }, 422)
       if (!turnstileToken)      return badRequest('Turnstile token required')
 
       // Verify Turnstile
