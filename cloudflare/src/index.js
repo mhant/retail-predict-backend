@@ -299,6 +299,22 @@ export default {
       return apiJson({ ok: true, ticker, interval, data: results });
     }
 
+    // GET /api/prices/latest-timestamps?interval=1d
+    if (request.method === 'GET' && path === '/api/prices/latest-timestamps') {
+      const interval = params.get('interval') || '1d';
+      const { results } = await env.DB.prepare(
+        `SELECT ticker, MAX(ts) AS latest_ts, COUNT(*) AS bar_count
+         FROM price_snapshots
+         WHERE interval = ?1
+         GROUP BY ticker`
+      ).bind(interval).all();
+      const map = {};
+      for (const r of (results || [])) {
+        map[r.ticker] = { latest_ts: r.latest_ts, bar_count: r.bar_count };
+      }
+      return apiJson({ ok: true, data: map });
+    }
+
     // GET /api/pipeline
     if (request.method === 'GET' && path === '/api/pipeline') {
       const { results } = await env.DB.prepare(

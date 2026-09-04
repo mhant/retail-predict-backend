@@ -48,6 +48,23 @@ def fetch_invalid_tickers() -> frozenset[str]:
     return frozenset()
 
 
+def fetch_price_latest_timestamps(interval: str = "1d") -> dict[str, dict]:
+    """
+    Fetch latest price timestamp and bar count per ticker from D1.
+    Returns: { "GME": {"latest_ts": 1725321600.0, "bar_count": 70}, ... }
+    """
+    try:
+        resp = _SESSION.get(
+            f"{WORKER_URL}/api/prices/latest-timestamps?interval={interval}",
+            timeout=10,
+        )
+        if resp.ok:
+            return resp.json().get("data", {})
+    except Exception as exc:
+        print(f"  [d1] warning: failed to fetch price timestamps ({exc}) — defaulting to full backfill")
+    return {}
+
+
 def ingest(table: str, rows: list[dict], mode: str = "ignore") -> dict:
     """
     Bulk-insert rows into a D1 table via the Worker proxy.

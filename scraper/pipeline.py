@@ -575,11 +575,18 @@ def _compute_indicators(hist: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_market_data(
-    tickers: list[str], pipeline_started_at: float
+    tickers: list[str],
+    pipeline_started_at: float,
+    existing_price_meta: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """
     Returns (price_snapshot_rows, institutional_data_rows, scraper_event_rows, metadata_rows).
     Fetches 3 months of history so technical indicators have enough periods.
+    
+    If existing_price_meta is provided:
+      - New tickers (not in DB or <15 bars): writes full historical backfill (~70 bars).
+      - Existing tickers (>=15 bars in DB): writes only newest candles (ts >= latest_ts),
+        cutting price snapshot writes by ~98% while keeping indicators 100% accurate.
     """
     price_rows:    list[dict] = []
     inst_rows:     list[dict] = []
@@ -587,6 +594,10 @@ def fetch_market_data(
     metadata_rows: list[dict] = []
     today = time.strftime("%Y-%m-%d")
     now   = time.time()
+    
+    existing_meta = existing_price_meta or {}
+    new_tickers_count = 0
+    existing_tickers_count = 0
 
     for ticker in tickers:
         try:
@@ -613,11 +624,30 @@ def fetch_market_data(
                     return None
                 return float(v)
 
-            for ts, row in hist.iterrows():
+            # Check if we already have sufficient history for this ticker in D1
+            existing = existing_meta.get(ticker)
+            is_new = (
+                existing is None
+                or existing.get("latest_ts") is None
+                or existing.get("bar_count", 0) < 15
+            )
+
+            if is_new:
+                new_tickers_count += 1
+                ticker_bars = hist
+            else:
+                existing_tickers_count += 1
+                latest_ts = float(existing["latest_ts"])
+                # Filter to bars at or newer than our latest DB timestamp (or at least the latest candle)
+                filtered = hist[hist.index.map(lambda ts: ts.timestamp() if hasattr(ts, 'timestamp') else float(ts)) >= latest_ts]
+                ticker_bars = filtered if not filtered.empty else hist.iloc[-1:]
+
+            for ts, row in ticker_bars.iterrows():
+                ts_val = ts.timestamp() if hasattr(ts, 'timestamp') else float(ts)
                 price_rows.append({
                     "ticker":            ticker,
                     "interval":          "1d",
-                    "ts":                ts.timestamp(),
+                    "ts":                ts_val,
                     "open":              _safe(row, "Open"),
                     "high":              _safe(row, "High"),
                     "low":               _safe(row, "Low"),
@@ -672,7 +702,7 @@ def fetch_market_data(
                 "occurred_at":         now,
             })
 
-    print(f"  [yfinance] {len(price_rows)} price rows, {len(inst_rows)} ok, {len(event_rows)} skipped, {len(metadata_rows)} metadata")
+    print(f"  [yfinance] {len(price_rows)} price rows ({new_tickers_count} backfilled, {existing_tickers_count} incremental), {len(inst_rows)} ok, {len(event_rows)} skipped, {len(metadata_rows)} metadata")
     if event_rows:
         print(f"  [yfinance] skipped: {[e['ticker'] for e in event_rows]}")
 
@@ -877,7 +907,10 @@ def run() -> None:
 
         print("\n── Fetching market data (yFinance) ──")
         print(f"  tracking {len(top_tickers)} tickers ({len(current_top)} current + {len(hist_extra)} historical + {len(watch_extra)} watchlist)")
-        price_rows, inst_rows, event_rows, metadata_rows = fetch_market_data(top_tickers, started_at)
+        existing_price_meta = d1.fetch_price_latest_timestamps("1d")
+        price_rows, inst_rows, event_rows, metadata_rows = fetch_market_data(
+            top_tickers, started_at, existing_price_meta=existing_price_meta
+        )
 
         d1.ingest("price_snapshots", price_rows, mode="replace")
         d1.ingest("institutional_data", [
