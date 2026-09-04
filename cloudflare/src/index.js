@@ -19,10 +19,16 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
-function apiJson(data, status = 200) {
+function apiJson(data, status = 200, cacheTtl = 0) {
+  const headers = { 'Content-Type': 'application/json', ...CORS };
+  if (cacheTtl > 0) {
+    headers['Cache-Control'] = `public, max-age=60, s-maxage=${cacheTtl}`;
+  } else {
+    headers['Cache-Control'] = 'no-store';
+  }
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS },
+    headers,
   });
 }
 
@@ -181,7 +187,7 @@ async function hashIp(ip) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url    = new URL(request.url);
     const path   = url.pathname;
     const params = url.searchParams;
@@ -189,6 +195,32 @@ export default {
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS });
+    }
+
+    // Public read endpoints that can be safely served from Cloudflare edge cache
+    const isCacheableRead = request.method === 'GET' &&
+      path.startsWith('/api/') &&
+      !path.startsWith('/api/debug') &&
+      !path.startsWith('/api/tips/all') &&
+      !path.startsWith('/api/tips/reported') &&
+      !path.startsWith('/api/tips/recent');
+
+    if (isCacheableRead) {
+      try {
+        const cache = caches.default;
+        const cached = await cache.match(request);
+        if (cached) return cached;
+      } catch (_) {}
+    }
+
+    function respond(data, status = 200, cacheTtl = 300) {
+      const res = apiJson(data, status, cacheTtl);
+      if (isCacheableRead && cacheTtl > 0 && ctx && ctx.waitUntil) {
+        try {
+          ctx.waitUntil(caches.default.put(request, res.clone()));
+        } catch (_) {}
+      }
+      return res;
     }
 
     // ── Read API (public, no auth) ────────────────────────────────────────────
@@ -231,7 +263,7 @@ export default {
          ORDER BY MAX(scraped_utc) DESC
          LIMIT 200`
       ).bind(cutoff).all();
-      return apiJson({ ok: true, data: results });
+      return respond({ ok: true, data: results }, 200, 300);
     }
 
     // GET /api/tracked-tickers — all tickers ever mentioned, minus confirmed-delisted
@@ -254,7 +286,7 @@ export default {
            )
          ORDER BY ticker`
       ).all();
-      return apiJson({ ok: true, tickers: results.map(r => r.ticker) });
+      return respond({ ok: true, tickers: results.map(r => r.ticker) }, 200, 300);
     }
 
     // GET /api/invalid-tickers — tickers with 2+ yfinance failures (used by pipeline)
@@ -264,7 +296,7 @@ export default {
          WHERE event_type IN ('ticker_not_found', 'delisted')
          GROUP BY ticker HAVING COUNT(*) >= 2`
       ).all();
-      return apiJson({ ok: true, tickers: results.map(r => r.ticker) });
+      return respond({ ok: true, tickers: results.map(r => r.ticker) }, 200, 300);
     }
 
     // GET /api/mentions?ticker=GME
@@ -280,7 +312,7 @@ export default {
          WHERE ticker = ?1
          ORDER BY score DESC LIMIT 50`
       ).bind(ticker).all();
-      return apiJson({ ok: true, ticker, data: results });
+      return respond({ ok: true, ticker, data: results }, 200, 300);
     }
 
     // GET /api/prices?ticker=GME&interval=1d
@@ -296,7 +328,7 @@ export default {
          WHERE ticker = ?1 AND interval = ?2
          ORDER BY ts ASC`
       ).bind(ticker, interval).all();
-      return apiJson({ ok: true, ticker, interval, data: results });
+      return respond({ ok: true, ticker, interval, data: results }, 200, 300);
     }
 
     // GET /api/prices/latest-timestamps?interval=1d
@@ -312,7 +344,7 @@ export default {
       for (const r of (results || [])) {
         map[r.ticker] = { latest_ts: r.latest_ts, bar_count: r.bar_count };
       }
-      return apiJson({ ok: true, data: map });
+      return respond({ ok: true, data: map }, 200, 60);
     }
 
     // GET /api/pipeline
@@ -323,7 +355,7 @@ export default {
                 predictions_written, error_message
          FROM pipeline_runs ORDER BY started_at DESC LIMIT 20`
       ).all();
-      return apiJson({ ok: true, data: results });
+      return respond({ ok: true, data: results }, 200, 60);
     }
 
     // GET /api/predictions?ticker=GME
@@ -348,7 +380,7 @@ export default {
            ORDER BY predicted_at DESC LIMIT 100`
         ).bind(ticker).all(),
       ])
-      return apiJson({ ok: true, ticker, model: modelRows.results, hype: hyp, history: histRows.results })
+      return respond({ ok: true, ticker, model: modelRows.results, hype: hyp, history: histRows.results }, 200, 300);
     }
 
     // GET /api/events
@@ -357,7 +389,7 @@ export default {
         `SELECT event_type, ticker, detail, occurred_at
          FROM scraper_events ORDER BY occurred_at DESC LIMIT 100`
       ).all();
-      return apiJson({ ok: true, data: results });
+      return respond({ ok: true, data: results }, 200, 300);
     }
 
     // GET /api/debug/ip-hash — returns your hashed IP (for setting up the rate-limit allowlist)
@@ -452,7 +484,7 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
          FROM tips WHERE ticker = ?1 AND status = 'approved' AND report_count < 5
          ORDER BY submitted_at DESC LIMIT 20`
       ).bind(ticker.toUpperCase()).all()
-      return apiJson({ ok: true, ticker, data: results })
+      return respond({ ok: true, ticker, data: results }, 200, 60)
     }
 
     // GET /api/tips/feed — all approved tips, newest first (public)
@@ -462,7 +494,7 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
          FROM tips WHERE status = 'approved' AND report_count < 5
          ORDER BY submitted_at DESC LIMIT 100`
       ).all()
-      return apiJson({ ok: true, data: results })
+      return respond({ ok: true, data: results }, 200, 60)
     }
 
     // POST /api/tips/:id/report — increment report count (public)
