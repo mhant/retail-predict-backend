@@ -497,8 +497,8 @@ def run_predictions(
     return predictions
 
 
-def compute_sentiment_summary(mentions: list[dict]) -> list[dict]:
-    """Pre-aggregate sentiment per ticker from this batch (24h window)."""
+def compute_sentiment_summary(mentions: list[dict], window_hours: int = 168) -> list[dict]:
+    """Pre-aggregate sentiment per ticker from this batch (default 168h / 7d window)."""
     by_ticker: dict[str, list[dict]] = defaultdict(list)
     for m in mentions:
         by_ticker[m["ticker"]].append(m)
@@ -523,7 +523,7 @@ def compute_sentiment_summary(mentions: list[dict]) -> list[dict]:
 
         summaries.append({
             "ticker":                    ticker,
-            "window_hours":              24,
+            "window_hours":              window_hours,
             "computed_at":               now,
             "mention_count":             len(rows),
             "avg_sentiment":             sum(sentiments) / len(sentiments),

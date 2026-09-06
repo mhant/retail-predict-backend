@@ -226,50 +226,74 @@ export default {
     // ── Read API (public, no auth) ────────────────────────────────────────────
 
     // GET /api/sentiment?window=168
-    // Aggregates raw_mentions directly using scraped_utc so all window sizes work.
-    // window param = hours, default 168 (7d), capped at 720 (30d).
+    // Reads directly from pre-aggregated ticker_sentiment_summary (reads ~100 rows instead of 50,000)
     if (request.method === 'GET' && path === '/api/sentiment') {
-      const windowHours = Math.min(720, Math.max(1, parseInt(params.get('window') || '168', 10) || 168))
-      const cutoff = Date.now() / 1000 - windowHours * 3600;
-      const { results } = await env.DB.prepare(
+      const windowHours = Math.min(720, Math.max(1, parseInt(params.get('window') || '168', 10) || 168));
+      
+      // 1. First attempt: read from pre-aggregated ticker_sentiment_summary
+      let { results } = await env.DB.prepare(
         `SELECT
-           rm.ticker,
-           COUNT(*)                                    AS mention_count,
-           AVG(vader_compound)                         AS avg_sentiment,
-           AVG(vader_compound)                         AS upvote_weighted_sentiment,
-           AVG(upvote_ratio)                           AS avg_upvote_ratio,
-           COUNT(DISTINCT subreddit)                   AS source_count,
-           MAX(scraped_utc)                            AS latest_mention_utc,
-           MIN(scraped_utc)                            AS first_mention_utc,
+           tss.ticker,
+           tss.mention_count,
+           tss.avg_sentiment,
+           tss.upvote_weighted_sentiment,
+           tss.avg_upvote_ratio,
+           tss.source_count,
+           tss.computed_at                             AS latest_mention_utc,
+           tss.computed_at                             AS first_mention_utc,
            tm.company_name,
            tm.sector,
            tm.industry,
            tm.exchange,
            tm.quote_type,
-           (SELECT title FROM raw_mentions sub
-            WHERE sub.ticker = rm.ticker
-              AND sub.scraped_utc >= ?1
-              AND sub.vader_compound IS NOT NULL
-            ORDER BY score DESC LIMIT 1)              AS top_title
-         FROM raw_mentions rm
-         LEFT JOIN ticker_metadata tm ON tm.ticker = rm.ticker
-         WHERE scraped_utc >= ?1 AND vader_compound IS NOT NULL
-           AND rm.ticker NOT IN (
-             SELECT ticker FROM scraper_events
-             WHERE event_type IN ('ticker_not_found', 'delisted')
-             GROUP BY ticker HAVING COUNT(*) >= 2
-           )
-         GROUP BY rm.ticker
-         ORDER BY MAX(scraped_utc) DESC
+           tss.top_title
+         FROM ticker_sentiment_summary tss
+         LEFT JOIN ticker_metadata tm ON tm.ticker = tss.ticker
+         WHERE tss.ticker NOT IN (
+           SELECT ticker FROM scraper_events
+           WHERE event_type IN ('ticker_not_found', 'delisted')
+           GROUP BY ticker HAVING COUNT(*) >= 2
+         )
+         ORDER BY tss.computed_at DESC, tss.mention_count DESC
          LIMIT 200`
-      ).bind(cutoff).all();
+      ).all();
+
+      // 2. Safe fallback if summary table hasn't been populated yet: clean 1-pass query without correlated subquery
+      if (!results || results.length === 0) {
+        const cutoff = Date.now() / 1000 - windowHours * 3600;
+        const fallback = await env.DB.prepare(
+          `SELECT
+             rm.ticker,
+             COUNT(*)                                    AS mention_count,
+             AVG(vader_compound)                         AS avg_sentiment,
+             AVG(vader_compound)                         AS upvote_weighted_sentiment,
+             AVG(upvote_ratio)                           AS avg_upvote_ratio,
+             COUNT(DISTINCT subreddit)                   AS source_count,
+             MAX(scraped_utc)                            AS latest_mention_utc,
+             MIN(scraped_utc)                            AS first_mention_utc,
+             tm.company_name,
+             tm.sector,
+             tm.industry,
+             tm.exchange,
+             tm.quote_type,
+             ''                                          AS top_title
+           FROM raw_mentions rm
+           LEFT JOIN ticker_metadata tm ON tm.ticker = rm.ticker
+           WHERE scraped_utc >= ?1 AND vader_compound IS NOT NULL
+           GROUP BY rm.ticker
+           ORDER BY MAX(scraped_utc) DESC
+           LIMIT 200`
+        ).bind(cutoff).all();
+        results = fallback.results || [];
+      }
+
       return respond({ ok: true, data: results }, 200, 300);
     }
 
-    // GET /api/tracked-tickers — all tickers ever mentioned, minus confirmed-delisted
+    // GET /api/tracked-tickers — all active tracked tickers
     if (request.method === 'GET' && path === '/api/tracked-tickers') {
       const { results } = await env.DB.prepare(
-        `SELECT DISTINCT ticker FROM raw_mentions
+        `SELECT DISTINCT ticker FROM ticker_sentiment_summary
          WHERE ticker IS NOT NULL
            AND ticker NOT IN (
              SELECT ticker FROM scraper_events
