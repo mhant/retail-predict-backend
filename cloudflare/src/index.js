@@ -186,6 +186,25 @@ async function hashIp(ip) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
 }
 
+// Worker isolate in-memory cache (shared across requests in the same isolate instance)
+const ISOLATE_CACHE = new Map();
+
+function getIsolateCached(key, ttlSec = 300) {
+  const item = ISOLATE_CACHE.get(key);
+  if (item && (Date.now() - item.ts) < ttlSec * 1000) {
+    return item.data;
+  }
+  return null;
+}
+
+function setIsolateCache(key, data) {
+  if (ISOLATE_CACHE.size > 500) {
+    const oldestKey = ISOLATE_CACHE.keys().next().value;
+    if (oldestKey) ISOLATE_CACHE.delete(oldestKey);
+  }
+  ISOLATE_CACHE.set(key, { ts: Date.now(), data });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url    = new URL(request.url);
@@ -197,7 +216,7 @@ export default {
       return new Response(null, { status: 204, headers: CORS });
     }
 
-    // Public read endpoints that can be safely served from Cloudflare edge cache
+    // Public read endpoints that can be safely served from memory / Cloudflare edge cache
     const isCacheableRead = request.method === 'GET' &&
       path.startsWith('/api/') &&
       !path.startsWith('/api/debug') &&
@@ -205,15 +224,33 @@ export default {
       !path.startsWith('/api/tips/reported') &&
       !path.startsWith('/api/tips/recent');
 
+    const cacheKey = request.url;
+
     if (isCacheableRead) {
+      // 1. Check ultra-fast worker isolate memory cache (0.001ms)
+      const memData = getIsolateCached(cacheKey);
+      if (memData) {
+        return apiJson(memData, 200, 300);
+      }
+
+      // 2. Check Cloudflare CDN edge cache
       try {
         const cache = caches.default;
         const cached = await cache.match(request);
-        if (cached) return cached;
+        if (cached) {
+          try {
+            const dataClone = await cached.clone().json();
+            setIsolateCache(cacheKey, dataClone);
+          } catch (_) {}
+          return cached;
+        }
       } catch (_) {}
     }
 
     function respond(data, status = 200, cacheTtl = 300) {
+      if (isCacheableRead && cacheTtl > 0) {
+        setIsolateCache(cacheKey, data);
+      }
       const res = apiJson(data, status, cacheTtl);
       if (isCacheableRead && cacheTtl > 0 && ctx && ctx.waitUntil) {
         try {
@@ -615,6 +652,7 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
 
       try {
         const { inserted, skipped } = await batchInsert(env.DB, table, rows, mode);
+        ISOLATE_CACHE.clear();
         return json({ ok: true, table, attempted: rows.length, inserted, skipped });
       } catch (err) {
         console.error(`Ingest error for table '${table}':`, err);
