@@ -12,7 +12,7 @@ import os
 os.environ.setdefault("WORKER_URL", "https://dummy-worker.workers.dev")
 os.environ.setdefault("WRITE_TOKEN", "dummy-write-token")
 
-from scraper.pipeline import fetch_market_data, run_predictions
+from scraper.pipeline import fetch_market_data, run_predictions, compute_sentiment_summary
 from scraper import d1_client
 
 
@@ -174,6 +174,47 @@ class TestD1ClientTimestamps(unittest.TestCase):
         mock_get.side_effect = Exception("Connection timed out")
         result = d1_client.fetch_price_latest_timestamps("1d")
         self.assertEqual(result, {}, "Should return empty dict on failure without raising exception")
+
+
+class TestSentimentSummaryMultiWindow(unittest.TestCase):
+
+    def test_multi_window_sentiment_aggregation(self):
+        """Test that mentions are correctly partitioned and summarized by 24h, 168h (7d), and 720h (30d) windows."""
+        now = time.time()
+        mock_mentions = [
+            # Recent mention (2h ago)
+            {"ticker": "GME", "vader_compound": 0.8, "score": 100, "upvote_ratio": 0.9, "subreddit": "stocks", "created_utc": now - 2 * 3600, "title": "GME mooning"},
+            # Medium mention (3 days ago = 72h ago)
+            {"ticker": "GME", "vader_compound": 0.4, "score": 50, "upvote_ratio": 0.8, "subreddit": "wallstreetbets", "created_utc": now - 72 * 3600, "title": "GME weekly check"},
+            # Older mention (10 days ago = 240h ago)
+            {"ticker": "GME", "vader_compound": -0.2, "score": 20, "upvote_ratio": 0.6, "subreddit": "investing", "created_utc": now - 240 * 3600, "title": "GME risk"},
+            # Distinct ticker (2h ago)
+            {"ticker": "AMC", "vader_compound": 0.5, "score": 10, "upvote_ratio": 0.7, "subreddit": "stocks", "created_utc": now - 2 * 3600, "title": "AMC pump"},
+        ]
+
+        all_summaries = []
+        for w in (24, 168, 720):
+            cutoff = now - (w * 3600)
+            window_mentions = [m for m in mock_mentions if m["created_utc"] >= cutoff]
+            all_summaries.extend(compute_sentiment_summary(window_mentions, window_hours=w))
+
+        # Check 24h window
+        w24_gme = [s for s in all_summaries if s["ticker"] == "GME" and s["window_hours"] == 24]
+        self.assertEqual(len(w24_gme), 1)
+        self.assertEqual(w24_gme[0]["mention_count"], 1)
+        self.assertAlmostEqual(w24_gme[0]["avg_sentiment"], 0.8)
+
+        # Check 168h (7d) window
+        w168_gme = [s for s in all_summaries if s["ticker"] == "GME" and s["window_hours"] == 168]
+        self.assertEqual(len(w168_gme), 1)
+        self.assertEqual(w168_gme[0]["mention_count"], 2)
+        self.assertAlmostEqual(w168_gme[0]["avg_sentiment"], 0.6)
+
+        # Check 720h (30d) window
+        w720_gme = [s for s in all_summaries if s["ticker"] == "GME" and s["window_hours"] == 720]
+        self.assertEqual(len(w720_gme), 1)
+        self.assertEqual(w720_gme[0]["mention_count"], 3)
+        self.assertAlmostEqual(w720_gme[0]["avg_sentiment"], (0.8 + 0.4 - 0.2) / 3)
 
 
 if __name__ == "__main__":

@@ -897,9 +897,20 @@ def run() -> None:
               f"({len(social_mentions)} social + {len(rss_mentions)} RSS + {len(yf_mentions)} yf_news)")
 
         print("\n── Computing ticker sentiment summary + hype signals ──")
-        summaries = compute_sentiment_summary(mentions)
-        d1.ingest("ticker_sentiment_summary", summaries, mode="replace")
-        print(f"  → {len(summaries)} ticker summaries")
+        now = time.time()
+        all_summaries: list[dict] = []
+        for w in (24, 168, 720):
+            cutoff = now - (w * 3600)
+            window_mentions = [
+                m for m in mentions
+                if (m.get("created_utc") or m.get("scraped_utc") or now) >= cutoff
+            ]
+            w_summaries = compute_sentiment_summary(window_mentions, window_hours=w)
+            all_summaries.extend(w_summaries)
+            print(f"  → {len(w_summaries)} summaries for {w}h window")
+
+        d1.ingest("ticker_sentiment_summary", all_summaries, mode="replace")
+        print(f"  → {len(all_summaries)} total ticker summaries ingested across [24h, 7d, 30d]")
 
         hype_signals = compute_hype_signals(mentions)
         d1.ingest("hype_signals", hype_signals, mode="replace")

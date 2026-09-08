@@ -267,7 +267,7 @@ export default {
     if (request.method === 'GET' && path === '/api/sentiment') {
       const windowHours = Math.min(720, Math.max(1, parseInt(params.get('window') || '168', 10) || 168));
       
-      // 1. First attempt: read from pre-aggregated ticker_sentiment_summary
+      // 1. First attempt: read from pre-aggregated ticker_sentiment_summary for the requested window
       let { results } = await env.DB.prepare(
         `SELECT
            tss.ticker,
@@ -286,16 +286,17 @@ export default {
            tss.top_title
          FROM ticker_sentiment_summary tss
          LEFT JOIN ticker_metadata tm ON tm.ticker = tss.ticker
-         WHERE tss.ticker NOT IN (
-           SELECT ticker FROM scraper_events
-           WHERE event_type IN ('ticker_not_found', 'delisted')
-           GROUP BY ticker HAVING COUNT(*) >= 2
-         )
+         WHERE tss.window_hours = ?1
+           AND tss.ticker NOT IN (
+             SELECT ticker FROM scraper_events
+             WHERE event_type IN ('ticker_not_found', 'delisted')
+             GROUP BY ticker HAVING COUNT(*) >= 2
+           )
          ORDER BY tss.computed_at DESC, tss.mention_count DESC
          LIMIT 200`
-      ).all();
+      ).bind(windowHours).all();
 
-      // 2. Safe fallback if summary table hasn't been populated yet: clean 1-pass query without correlated subquery
+      // 2. Safe fallback if summary table hasn't been populated for this window yet: clean 1-pass query without correlated subquery
       if (!results || results.length === 0) {
         const cutoff = Date.now() / 1000 - windowHours * 3600;
         const fallback = await env.DB.prepare(
@@ -317,6 +318,11 @@ export default {
            FROM raw_mentions rm
            LEFT JOIN ticker_metadata tm ON tm.ticker = rm.ticker
            WHERE scraped_utc >= ?1 AND vader_compound IS NOT NULL
+             AND rm.ticker NOT IN (
+               SELECT ticker FROM scraper_events
+               WHERE event_type IN ('ticker_not_found', 'delisted')
+               GROUP BY ticker HAVING COUNT(*) >= 2
+             )
            GROUP BY rm.ticker
            ORDER BY MAX(scraped_utc) DESC
            LIMIT 200`
