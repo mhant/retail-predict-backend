@@ -638,6 +638,18 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
       }
     }
 
+    // ── Prune endpoint (auth required) ────────────────────────────────────────
+    if (request.method === 'POST' && path === '/prune') {
+      if (!isAuthed(request, env)) return unauthorized();
+      try {
+        const stats = await pruneOldData(env.DB);
+        ISOLATE_CACHE.clear();
+        return json({ ok: true, stats });
+      } catch (err) {
+        return json({ ok: false, error: err.message }, 500);
+      }
+    }
+
     // ── Ingest endpoint ───────────────────────────────────────────────────────
     if (request.method === 'POST' && path === '/ingest') {
       if (!isAuthed(request, env)) return unauthorized();
@@ -668,4 +680,28 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
 
     return json({ ok: false, error: 'Not found' }, 404);
   },
+
+  // Daily automated cron trigger to prune old historical data
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(pruneOldData(env.DB));
+  },
 };
+
+async function pruneOldData(db) {
+  try {
+    const results = await db.batch([
+      db.prepare("DELETE FROM combined_predictions WHERE predicted_at < strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 days')"),
+      db.prepare("DELETE FROM news_articles WHERE scraped_utc < unixepoch('now', '-60 days')"),
+      db.prepare("DELETE FROM raw_mentions WHERE scraped_utc < unixepoch('now', '-90 days')"),
+    ]);
+    const deletedPredictions = results[0]?.meta?.changes || 0;
+    const deletedNews = results[1]?.meta?.changes || 0;
+    const deletedMentions = results[2]?.meta?.changes || 0;
+    console.log(`[prune] Auto-prune complete: ${deletedPredictions} predictions, ${deletedNews} news, ${deletedMentions} mentions deleted.`);
+    return { deletedPredictions, deletedNews, deletedMentions };
+  } catch (err) {
+    console.error('[prune] Auto-prune error:', err);
+    throw err;
+  }
+}
+
