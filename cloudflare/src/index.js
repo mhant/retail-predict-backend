@@ -689,16 +689,19 @@ Reply with ONLY the single word "safe" or "unsafe". No punctuation, no explanati
 
 async function pruneOldData(db) {
   try {
+    // Preserves ALL predictions (combined_predictions, model_predictions, hype_signals, prediction_outcomes),
+    // user tips, metadata, institutional data, and insider trades indefinitely for backtesting & analytics.
+    // Only cleans up temporary scraper events and raw social media text older than 365 days.
     const results = await db.batch([
-      db.prepare("DELETE FROM combined_predictions WHERE predicted_at < strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 days')"),
-      db.prepare("DELETE FROM news_articles WHERE scraped_utc < unixepoch('now', '-60 days')"),
-      db.prepare("DELETE FROM raw_mentions WHERE scraped_utc < unixepoch('now', '-90 days')"),
+      db.prepare("DELETE FROM scraper_events WHERE occurred_at < strftime('%Y-%m-%d %H:%M:%S', 'now', '-90 days')"),
+      db.prepare("DELETE FROM raw_mentions WHERE scraped_utc < unixepoch('now', '-365 days')"),
+      db.prepare("DELETE FROM news_articles WHERE scraped_utc < unixepoch('now', '-365 days')"),
     ]);
-    const deletedPredictions = results[0]?.meta?.changes || 0;
-    const deletedNews = results[1]?.meta?.changes || 0;
-    const deletedMentions = results[2]?.meta?.changes || 0;
-    console.log(`[prune] Auto-prune complete: ${deletedPredictions} predictions, ${deletedNews} news, ${deletedMentions} mentions deleted.`);
-    return { deletedPredictions, deletedNews, deletedMentions };
+    const deletedEvents = results[0]?.meta?.changes || 0;
+    const deletedMentions = results[1]?.meta?.changes || 0;
+    const deletedNews = results[2]?.meta?.changes || 0;
+    console.log(`[prune] Auto-prune complete: ${deletedEvents} scraper events, ${deletedMentions} old mentions, ${deletedNews} old news deleted. All predictions preserved.`);
+    return { deletedEvents, deletedMentions, deletedNews };
   } catch (err) {
     console.error('[prune] Auto-prune error:', err);
     throw err;
